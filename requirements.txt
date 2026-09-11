@@ -1,5 +1,6 @@
+# Core (already installed on this machine: opencv-python, numpy, mediapipe)
+opencv-python>=4.10
+numpy>=1.26
 
-
-mediapipe
-opencv-python
-numpy
+# Object detection + training (pulls in PyTorch automatically)
+ultralytics>=8.3

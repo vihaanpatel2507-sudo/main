@@ -1,130 +1,133 @@
-# NASA Video Pose Extraction Pipeline 🚀
+# 🚀 Space Station Monitor
 
-Turns ordinary video clips into **structured human motion data**. For every frame of every video, the pipeline detects a person's 33 body joints (Google's BlazePose model), drops unreliable ones, smooths them over time, and saves the result as clean JSON — plus an MP4 with the skeleton drawn over the original footage.
-
-It uses MediaPipe's current **Tasks API** (`mediapipe.tasks.python.vision.PoseLandmarker`) instead of the legacy `mp.solutions.pose`, which is broken/inconsistent across recent installs — so this works reliably on modern mediapipe + Python versions.
-
-## Project structure
+ML project that watches space-station camera videos and detects **objects**
+(astronauts, equipment) and **motion** (who is moving, where, how fast).
+Built to be trained on your own videos of astronauts.
 
 ```
-nasa videos/
-├── videos/                     # Input clips (.mp4 / .mov / .avi / .mkv)
-│   ├── clip1.mp4 ... clip5.mp4
-├── outputs/                    # Results: *_keypoints.json + *_skeleton.mp4
-├── logs/                       # Per-video logs from the last batch run
-├── extract_motion_data.py      # Core: pose extraction from a single video
-├── batch_extract.py            # Convenience: runs extraction on a whole folder
-├── pose_landmarker_lite.task   # MediaPipe model — fast (complexity 0)
-├── pose_landmarker_full.task   # MediaPipe model — balanced (complexity 1, default)
-├── requirements.txt            # mediapipe, opencv-python, numpy
-└── venv/                       # Python virtual environment
+video ──► motion detection ──► tracking + speed ──► annotated video
+      └─► YOLO object detection ─┘                 + events.jsonl
+                                                   + summary.json
 ```
 
-## How it works (the logic)
-
-`extract_motion_data.py` runs this pipeline on every frame of the input video:
-
-1. **Read & convert** — OpenCV (`VideoCapture`) reads the frame; it's converted BGR → RGB and wrapped as a MediaPipe `mp.Image` (SRGB). Frame timestamps are derived from `frame_id / fps`, which keeps the VIDEO running mode happy.
-
-2. **Detect pose** — `PoseLandmarker` runs in `RunningMode.VIDEO` with `detect_for_video(...)`. Because it's video mode (not image mode), MediaPipe **tracks** the person between frames (`min_tracking_confidence`) instead of re-detecting from scratch every frame, giving temporal coherence.
-
-3. **Filter weak keypoints** — any joint with `visibility < 0.5` (occluded, off-screen, or low confidence) is **dropped entirely** rather than kept as a noisy guess. That's why frames often contain fewer than all 33 joints (e.g. joints hidden behind equipment).
-
-4. **Temporal smoothing** — `TemporalSmoother` keeps a sliding window (default 5 frames) of each joint's (x, y, z) and outputs the moving average, removing frame-to-frame jitter.
-
-5. **Overlay drawing** — if `--overlay` is given, the skeleton (bone connections + joint dots) is drawn on the frame with OpenCV and encoded into a parallel MP4 via `VideoWriter`.
-
-6. **Save & report** — all frame entries are dumped to JSON at the end, then stats are printed: frames saved, pose detection rate, overlay path.
-
-### Coordinate system used in the output
-
-| Field | Meaning |
-|-------|---------|
-| `x`, `y` | Normalized 0–1 coordinates relative to the frame width/height (multiply by pixel size to get pixels) |
-| `z` | Depth relative to the hips — smaller (more negative) = closer to the camera |
-| `visibility` | 0–1 confidence that the joint is actually visible in the frame |
-
-The 33 BlazePose landmarks follow MediaPipe's fixed order: `nose`, eyes (inner/outer ×2), `ears`, `mouth`, `shoulders`, `elbows`, `wrists`, `pinky/index/thumb` ×2, `hips`, `knees`, `ankles`, `heels`, `foot_index`.
-
-## Getting started
+## ⚡ Fast start (2 minutes)
 
 ```powershell
-# one-time setup
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+cd space-station-monitor
+.venv\Scripts\activate              # activate the project venv
+python main.py demo                 # synthetic space clip -> tests everything
 ```
 
-First run auto-downloads the pose model (a few MB, one-time — but the `lite` and `full` models are already included in this repo, and the default complexity is 1 = full, so no download is needed).
+You get `outputs/demo_spacewalk_annotated.mp4` (green = calm motion,
+red = fast motion, yellow trail = path traveled), plus JSON event logs.
 
-### Run a single video
+## 📹 Analyze your real videos
+
+Put your space-station videos into `data/videos/`, then:
 
 ```powershell
-python extract_motion_data.py --video videos/clip2.mp4 --out outputs/clip2_keypoints.json --overlay outputs/clip2_skeleton.mp4
+# full analysis: motion + objects (astronaut = "person" in the pretrained model)
+python main.py analyze data/videos/your_video.mp4
+
+# motion-only (fast, no PyTorch)
+python main.py analyze data/videos/your_video.mp4 --no-objects
+
+# watch it live while processing (press q to quit)
+python main.py analyze data/videos/your_video.mp4 --show
+
+# use a model you trained (see below)
+python main.py analyze data/videos/your_video.mp4 --weights models/astronaut_yolo/weights/best.pt
 ```
 
-### Run a whole folder
+Useful knobs: `--conf 0.4` (detection threshold), `--min-area 1500`
+(ignore small motions), `--every 3` (object detection every Nth frame = faster),
+`--max-frames 500` (quick test on a clip).
 
-`batch_extract.py` loops over every video in a folder and runs the extraction on each:
+## 🏋️ Train YOLO on YOUR videos (~20 min of work)
 
+**Step 1 — extract frames**
 ```powershell
-python batch_extract.py --video-dir videos --out-dir outputs
+python main.py frames data/videos/your_video.mp4 --every 20
 ```
 
-### Options
+**Step 2 — label them** (draw boxes around astronauts/equipment)
+- Easiest: [Roboflow](https://roboflow.com) (web, free, exports YOLO format)
+- Also good: [CVAT](https://www.cvat.ai), or LabelImg (desktop: `pip install labelImg`)
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--frame-skip` | 1 | Process every Nth frame (2 = half the work, half the frame rate) |
-| `--model-complexity` | 1 | 0 = lite/fast, 1 = full/balanced, 2 = heavy/most accurate (heavy downloads on first use) |
-| `--min-detection-confidence` | 0.5 | Pose detection threshold |
-| `--min-tracking-confidence` | 0.5 | Tracking threshold between frames |
-| `--visibility-threshold` | 0.5 | Drop keypoints below this visibility score |
-| `--smooth-window` | 5 | Frames averaged for temporal smoothing |
-
-## Output format
-
-`*_keypoints.json` — a list, one entry per frame (real sample from `clip2_keypoints.json`):
-
-```json
-[
-  {
-    "frame_id": 240,
-    "timestamp": 8.008,
-    "keypoints": [
-      { "joint": "nose",           "x": 0.5253, "y": 0.4294, "z": -0.0734, "visibility": 0.9953 },
-      { "joint": "left_eye_inner", "x": 0.5278, "y": 0.4295, "z": -0.0982, "visibility": 0.9974 },
-      { "joint": "left_eye",       "x": 0.5301, "y": 0.4284, "z": -0.0982, "visibility": 0.9976 }
-      // ... 25 joints in this frame
-    ]
-  }
-  // ...
-]
+Export in **YOLO format**. Put the `.txt` label files into `data/labels/`
+(one `<imagename>.txt` per image) and a `classes.txt` listing your class
+names, one per line, e.g.:
+```
+astronaut
+equipment
+tool
 ```
 
-`*_skeleton.mp4` — the original video with the skeleton (green bones, red joints) drawn on top, encoded at `fps / frame_skip`.
+**Step 3 — build the dataset**
+```powershell
+python main.py prepare            # creates data/dataset/ + data.yaml (80/20 split)
+```
 
-## Results from the latest full run
+**Step 4 — train** (CPU: ~1-2 h for a few hundred images; on Google Colab's
+free GPU: ~10 min)
+```powershell
+python main.py train --epochs 40 --imgsz 480
+# Colab alternative: upload data/dataset/, then:
+#   !yolo detect train data=data.yaml model=yolo11n.pt epochs=40 imgsz=480
+```
 
-| Clip | Resolution | FPS | Frames | Duration | Pose detected | JSON size |
-|------|-----------|----:|-------:|---------:|--------------:|----------:|
-| clip1 | 854×480   | 30  | 15,622 | 521 s | — (overlay only, JSON missing) | — |
-| clip2 | 640×480   | 30  | 8,544  | 285 s | 5,807 frames (68.0%) | ~105 MB |
-| clip3 | 1920×1080 | 30  | 2,852  | 95 s  | 1,180 frames (41.4%) | ~40 MB |
-| clip4 | 1920×1080 | 59.9| 6,088  | 102 s | 5,851 frames (96.1%) | ~31 MB |
-| clip5 | 640×478   | 30  | 10,767 | 359 s | 8,449 frames (78.5%) | ~62 MB |
+**Step 5 — use your model**
+```powershell
+python main.py analyze data/videos/your_video.mp4 --weights models/astronaut_yolo/weights/best.pt
+```
 
-- **clip4** is the cleanest subject (96.1% of frames had a detected pose).
-- **clip3** is the weakest (41.4%) — typically caused by the subject being small/far from the camera, occlusion, or partially out of frame. Check `clip3_skeleton.mp4` to see which sections produced no skeleton.
-- Frames with no detected pose still appear in the JSON (with empty `keypoints`), so frame indices/timestamps stay aligned across all clips.
+## 📦 What the outputs mean
 
-## Notes & troubleshooting
+| File | Content |
+|---|---|
+| `*_annotated.mp4` | video with boxes, IDs, speed labels, trails, HUD |
+| `*_events.jsonl` | one JSON line per event: `{"type": "motion", "id": 3, "t": 12.5, "speed_px_s": 41.2, "bbox": [...]}` |
+| `*_summary.json` | duration, avg activity, % time active, unique tracks, max speed |
 
-- **Regenerate clip1's JSON** (its overlay exists but the JSON was missing after an earlier run):
-  ```powershell
-  python extract_motion_data.py --video videos/clip1.mp4 --out outputs/clip1_keypoints.json --overlay outputs/clip1_skeleton.mp4
-  ```
-- **Low detection rate?** Loosen the thresholds, e.g. `--min-detection-confidence 0.3 --visibility-threshold 0.3`, or use `--model-complexity 2` for the most accurate (slowest) model.
-- **Mediapipe warnings** in the console (`inference_feedback_manager`, `landmark_projection_calculator ... NORM_RECT`) are harmless internal messages, not errors.
-- Faster runs: `--frame-skip 2 --model-complexity 0` trades accuracy for speed (note the overlay is then encoded at `fps / frame_skip`, so it plays back at the same speed but with fewer analyzed frames).
+Motion events are logged for every tracked blob moving faster than
+`8 px/s` (tune in `SpaceStationMonitor.__init__` or `--min-area`).
+
+## 🔧 Troubleshooting
+
+- **`import torch` → DLL load failed**: your Visual C++ runtime is too old.
+  Install the latest: https://aka.ms/vs/17/release/vc_redist.x64.exe
+- **Too many false motion detections**: raise `--min-area` (e.g. 2000),
+  or raise `var_threshold` in `src/motion.py` (default 40).
+- **Astronaut not detected**: pretrained YOLO sees astronauts as `person`
+  (class 0). It works best when the astronaut fills a decent part of the
+  frame — train on your own videos for reliability (steps above).
+- **CPU too slow for training**: use Google Colab (free GPU) —
+  Runtime → Change runtime type → T4 GPU.
+
+## 📁 Project structure
+
+```
+space-station-monitor/
+├── main.py                  # CLI: demo / analyze / frames / prepare / train
+├── src/
+│   ├── motion.py            # MOG2 background subtraction motion detector
+│   ├── detector.py          # YOLO object detector wrapper
+│   ├── tracker.py           # centroid tracker (stable IDs + trails)
+│   └── pipeline.py          # full pipeline: detect → track → log → render
+├── data/
+│   ├── videos/              # ← put your space station videos here
+│   ├── frames/              # extracted frames for labeling
+│   ├── labels/              # your YOLO .txt labels + classes.txt
+│   └── dataset/             # generated YOLO dataset (train/val)
+├── models/                  # trained weights land here
+└── outputs/                 # annotated videos + events + summaries
+```
+
+## 🛰️ Ideas to extend
+
+- Pose estimation (MediaPipe is already installed) for astronaut activity
+  recognition (floating / working / exercising / sleeping)
+- Alert rules: "no motion in module for X minutes", "person near hatch"
+- Multiple camera support with per-camera configs
+- Stream input instead of file (cv2.VideoCapture RTSP URL)
 
