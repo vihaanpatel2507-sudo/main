@@ -1,0 +1,12 @@
+{
+  "output": {
+    "video_path": "output.mp4",
+    "csv_path": "output.csv",
+    "fps": 30.0
+  },
+  "out1": {
+    "video_path": "out1.mp4",
+    "csv_path": "out1.csv",
+    "fps": 59.940059669107676
+  }
+}
